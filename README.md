@@ -1,139 +1,214 @@
-# Deep SAD: A Method for Deep Semi-Supervised Anomaly Detection
-This repository provides a [PyTorch](https://pytorch.org/) implementation of the *Deep SAD* method presented in our ICLR 2020 paper ”Deep Semi-Supervised Anomaly Detection”.
+# Towards Total Recall in Industrial Anomaly Detection
 
+This repository contains the implementation for `PatchCore` as proposed in Roth et al. (2021), <https://arxiv.org/abs/2106.08265>.
 
-## Citation and Contact
-You find a PDF of the Deep Semi-Supervised Anomaly Detection ICLR 2020 paper on arXiv 
-[https://arxiv.org/abs/1906.02694](https://arxiv.org/abs/1906.02694).
+It also provides various pretrained models that can achieve up to _99.6%_ image-level anomaly
+detection AUROC, _98.4%_ pixel-level anomaly localization AUROC and _>95%_ PRO score (although the
+later metric is not included for license reasons).
 
-If you find our work useful, please also cite the paper:
+![defect_segmentation](images/patchcore_defect_segmentation.png)
+
+_For questions & feedback, please reach out to karsten.rh1@gmail.com!_
+
+---
+
+## Quick Guide
+
+First, clone this repository and set the `PYTHONPATH` environment variable with `env PYTHONPATH=src python bin/run_patchcore.py`.
+To train PatchCore on MVTec AD (as described below), run
+
 ```
-@InProceedings{ruff2020deep,
-  title     = {Deep Semi-Supervised Anomaly Detection},
-  author    = {Ruff, Lukas and Vandermeulen, Robert A. and G{\"o}rnitz, Nico and Binder, Alexander and M{\"u}ller, Emmanuel and M{\"u}ller, Klaus-Robert and Kloft, Marius},
-  booktitle = {International Conference on Learning Representations},
-  year      = {2020},
-  url       = {https://openreview.net/forum?id=HkgH0TEYwH}
+datapath=/path_to_mvtec_folder/mvtec datasets=('bottle' 'cable' 'capsule' 'carpet' 'grid' 'hazelnut'
+'leather' 'metal_nut' 'pill' 'screw' 'tile' 'toothbrush' 'transistor' 'wood' 'zipper')
+dataset_flags=($(for dataset in "${datasets[@]}"; do echo '-d '$dataset; done))
+
+
+python bin/run_patchcore.py --gpu 0 --seed 0 --save_patchcore_model \
+--log_group IM224_WR50_L2-3_P01_D1024-1024_PS-3_AN-1_S0 --log_online --log_project MVTecAD_Results results \
+patch_core -b wideresnet50 -le layer2 -le layer3 --faiss_on_gpu \
+--pretrain_embed_dimension 1024  --target_embed_dimension 1024 --anomaly_scorer_num_nn 1 --patchsize 3 \
+sampler -p 0.1 approx_greedy_coreset dataset --resize 256 --imagesize 224 "${dataset_flags[@]}" mvtec $datapath
+```
+
+which runs PatchCore on MVTec images of sizes 224x224 using a WideResNet50-backbone pretrained on
+ImageNet. For other sample runs with different backbones, larger images or ensembles, see
+`sample_training.sh`.
+
+Given a pretrained PatchCore model (or models for all MVTec AD subdatasets), these can be evaluated using
+
+```shell
+datapath=/path_to_mvtec_folder/mvtec
+loadpath=/path_to_pretrained_patchcores_models
+modelfolder=IM224_WR50_L2-3_P001_D1024-1024_PS-3_AN-1_S0
+savefolder=evaluated_results'/'$modelfolder
+
+datasets=('bottle'  'cable'  'capsule'  'carpet'  'grid'  'hazelnut' 'leather'  'metal_nut'  'pill' 'screw' 'tile' 'toothbrush' 'transistor' 'wood' 'zipper')
+dataset_flags=($(for dataset in "${datasets[@]}"; do echo '-d '$dataset; done))
+model_flags=($(for dataset in "${datasets[@]}"; do echo '-p '$loadpath'/'$modelfolder'/models/mvtec_'$dataset; done))
+
+python bin/load_and_evaluate_patchcore.py --gpu 0 --seed 0 $savefolder \
+patch_core_loader "${model_flags[@]}" --faiss_on_gpu \
+dataset --resize 366 --imagesize 320 "${dataset_flags[@]}" mvtec $datapath
+```
+
+A set of pretrained PatchCores are hosted here: __add link__. To use them (and replicate training),
+check out `sample_evaluation.sh` and `sample_training.sh`.
+
+---
+
+## In-Depth Description
+
+### Requirements
+
+Our results were computed using Python 3.8, with packages and respective version noted in
+`requirements.txt`. In general, the majority of experiments should not exceed 11GB of GPU memory;
+however using significantly large input images will incur higher memory cost.
+
+### Setting up MVTec AD
+
+To set up the main MVTec AD benchmark, download it from here: <https://www.mvtec.com/company/research/datasets/mvtec-ad>.
+Place it in some location `datapath`. Make sure that it follows the following data tree:
+
+```shell
+mvtec
+|-- bottle
+|-----|----- ground_truth
+|-----|----- test
+|-----|--------|------ good
+|-----|--------|------ broken_large
+|-----|--------|------ ...
+|-----|----- train
+|-----|--------|------ good
+|-- cable
+|-- ...
+```
+
+containing in total 15 subdatasets: `bottle`, `cable`, `capsule`, `carpet`, `grid`, `hazelnut`,
+`leather`, `metal_nut`, `pill`, `screw`, `tile`, `toothbrush`, `transistor`, `wood`, `zipper`.
+
+### "Training" PatchCore
+
+PatchCore extracts a (coreset-subsampled) memory of pretrained, locally aggregated training patch features:
+
+![patchcore_architecture](images/architecture.png)
+
+To do so, we have provided `bin/run_patchcore.py`, which uses `click` to manage and aggregate input
+arguments. This looks something like
+
+```shell
+python bin/run_patchcore.py \
+--gpu <gpu_id> --seed <seed> # Set GPU-id & reproducibility seed.
+--save_patchcore_model # If set, saves the patchcore model(s).
+--log_online # If set, logs results to a Weights & Biases account.
+--log_group IM224_WR50_L2-3_P01_D1024-1024_PS-3_AN-1_S0 --log_project MVTecAD_Results results # Logging details: Name of the run & Name of the overall project folder.
+
+patch_core  # We now pass all PatchCore-related parameters.
+-b wideresnet50  # Which backbone to use.
+-le layer2 -le layer3 # Which layers to extract features from.
+--faiss_on_gpu # If similarity-searches should be performed on GPU.
+--pretrain_embed_dimension 1024  --target_embed_dimension 1024 # Dimensionality of features extracted from backbone layer(s) and final aggregated PatchCore Dimensionality
+--anomaly_scorer_num_nn 1 --patchsize 3 # Num. nearest neighbours to use for anomaly detection & neighbourhoodsize for local aggregation.
+
+sampler # We now pass all the (Coreset-)subsampling parameters.
+-p 0.1 approx_greedy_coreset # Subsampling percentage & exact subsampling method.
+
+dataset # We now pass all the Dataset-relevant parameters.
+--resize 256 --imagesize 224 "${dataset_flags[@]}" mvtec $datapath # Initial resizing shape and final imagesize (centercropped) as well as the MVTec subdatasets to use.
+```
+
+Note that `sample_runs.sh` contains exemplary training runs to achieve strong AD performance. Due to
+repository changes (& hardware differences), results may deviate slightly from those reported in the
+paper, but should generally be very close or even better. As mentioned previously, for re-use and
+replicability we have also provided several pretrained PatchCore models hosted at __add link__ -
+download the folder, extract, and pass the model of your choice to
+`bin/load_and_evaluate_patchcore.py` which showcases an exemplary evaluation process.
+
+During (after) training, the following information will be stored:
+
+```shell
+|PatchCore model (if --save_patchcore_model is set)
+|-- models
+|-----|----- mvtec_bottle
+|-----|-----------|------- nnscorer_search_index.faiss
+|-----|-----------|------- patchcore_params.pkl
+|-----|----- mvtec_cable
+|-----|----- ...
+|-- results.csv # Contains performance for each subdataset.
+
+|Sample_segmentations (if --save_segmentation_images is set)
+```
+
+In addition to the main training process, we have also included Weights-&-Biases logging, which
+allows you to log all training & test performances online to Weights-and-Biases servers
+(<https://wandb.ai>). To use that, include the `--log_online` flag and provide your W&B key in
+`run_patchcore.py > --log_wandb_key`.
+
+Finally, due to the effectiveness and efficiency of PatchCore, we also incorporate the option to use
+an ensemble of backbone networks and network featuremaps. For this, provide the list of backbones to
+use (as listed in `/src/anomaly_detection/backbones.py`) with `-b <backbone` and, given their
+ordering, denote the layers to extract with `-le idx.<layer_name>`. An example with three different
+backbones would look something like
+
+```shell
+python bin/run_patchcore.py --gpu <gpu_id> --seed <seed> --save_patchcore_model --log_group <log_name> --log_online --log_project <log_project> results \
+
+patch_core -b wideresnet101 -b resnext101 -b densenet201 -le 0.layer2 -le 0.layer3 -le 1.layer2 -le 1.layer3 -le 2.features.denseblock2 -le 2.features.denseblock3 --faiss_on_gpu \
+
+--pretrain_embed_dimension 1024  --target_embed_dimension 384 --anomaly_scorer_num_nn 1 --patchsize 3 sampler -p 0.01 approx_greedy_coreset dataset --resize 256 --imagesize 224 "${dataset_flags[@]}" mvtec $datapath
+
+```
+
+When using `--save_patchcore_model`, in the case of ensembles, a respective ensemble of PatchCore parameters is stored.
+
+### Evaluating a pretrained PatchCore model
+
+To evaluate a/our pretrained PatchCore model(s), run
+
+```shell
+python bin/load_and_evaluate_patchcore.py --gpu <gpu_id> --seed <seed> $savefolder \
+patch_core_loader "${model_flags[@]}" --faiss_on_gpu \
+dataset --resize 366 --imagesize 320 "${dataset_flags[@]}" mvtec $datapath
+```
+
+assuming your pretrained model locations to be contained in `model_flags`; one for each subdataset
+in `dataset_flags`. Results will then be stored in `savefolder`. Example model & dataset flags:
+
+```shell
+model_flags=('-p', 'path_to_mvtec_bottle_patchcore_model', '-p', 'path_to_mvtec_cable_patchcore_model', ...)
+dataset_flags=('-d', 'bottle', '-d', 'cable', ...)
+```
+
+### Expected performance of pretrained models
+
+While there may be minor changes in performance due to software & hardware differences, the provided
+pretrained models should achieve the performances provided in their respective `results.csv`-files.
+The mean performance (particularly for the baseline WR50 as well as the larger Ensemble model)
+should look something like:
+
+| Model | Mean AUROC | Mean Seg. AUROC | Mean PRO
+|---|---|---|---|
+| WR50-baseline | 99.2% | 98.1% | 94.4%
+| Ensemble | __99.6%__ | __98.2%__ | __94.9%__
+
+### Citing
+
+If you use the code in this repository, please cite
+
+```
+@misc{roth2021total,
+      title={Towards Total Recall in Industrial Anomaly Detection},
+      author={Karsten Roth and Latha Pemula and Joaquin Zepeda and Bernhard Schölkopf and Thomas Brox and Peter Gehler},
+      year={2021},
+      eprint={2106.08265},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV}
 }
 ```
 
-If you would like get in touch, just drop us an email to [contact@lukasruff.com](mailto:contact@lukasruff.com).
+## Security
 
-
-## Abstract
-> > Deep approaches to anomaly detection have recently shown promising results over shallow methods on large and complex datasets. Typically anomaly detection is treated as an unsupervised learning problem. In practice however, one may have---in addition to a large set of unlabeled samples---access to a small pool of labeled samples, e.g. a subset verified by some domain expert as being normal or anomalous. Semi-supervised approaches to anomaly detection aim to utilize such labeled samples, but most proposed methods are limited to merely including labeled normal samples. Only a few methods take advantage of labeled anomalies, with existing deep approaches being domain-specific. In this work we present Deep SAD, an end-to-end deep methodology for general semi-supervised anomaly detection. We further introduce an information-theoretic framework for deep anomaly detection based on the idea that the entropy of the latent distribution for normal data should be lower than the entropy of the anomalous distribution, which can serve as a theoretical interpretation for our method. In extensive experiments on MNIST, Fashion-MNIST, and CIFAR-10, along with other anomaly detection benchmark datasets, we demonstrate that our method is on par or outperforms shallow, hybrid, and deep competitors, yielding appreciable performance improvements even when provided with only little labeled data.
-
-## The need for semi-supervised anomaly detection
-
-![fig1](imgs/fig1.png?raw=true "fig1")
-
-
-## Installation
-This code is written in `Python 3.7` and requires the packages listed in `requirements.txt`.
-
-Clone the repository to your machine and directory of choice:
-```
-git clone https://github.com/lukasruff/Deep-SAD-PyTorch.git
-```
-
-To run the code, we recommend setting up a virtual environment, e.g. using `virtualenv` or `conda`:
-
-### `virtualenv`
-```
-# pip install virtualenv
-cd <path-to-Deep-SAD-PyTorch-directory>
-virtualenv myenv
-source myenv/bin/activate
-pip install -r requirements.txt
-```
-
-### `conda`
-```
-cd <path-to-Deep-SAD-PyTorch-directory>
-conda create --name myenv
-source activate myenv
-while read requirement; do conda install -n myenv --yes $requirement; done < requirements.txt
-```
-
-
-## Running experiments
-We have implemented the [`MNIST`](http://yann.lecun.com/exdb/mnist/), 
-[`Fashion-MNIST`](https://research.zalando.com/welcome/mission/research-projects/fashion-mnist/), and 
-[`CIFAR-10`](https://www.cs.toronto.edu/~kriz/cifar.html) datasets as well as the classic anomaly detection
-benchmark datasets `arrhythmia`, `cardio`, `satellite`, `satimage-2`, `shuttle`, and `thyroid` from the 
-Outlier Detection DataSets (ODDS) repository ([http://odds.cs.stonybrook.edu/](http://odds.cs.stonybrook.edu/))
-as reported in the paper. 
-
-The implemented network architectures are as reported in the appendix of the paper.
-
-### Deep SAD
-You can run Deep SAD experiments using the `main.py` script.    
-
-Here's an example on `MNIST` with `0` considered to be the normal class and having 1% labeled (known) training samples 
-from anomaly class `1` with a pollution ratio of 10% of the unlabeled training data (with unknown anomalies from all 
-anomaly classes `1`-`9`):
-```
-cd <path-to-Deep-SAD-PyTorch-directory>
-
-# activate virtual environment
-source myenv/bin/activate  # or 'source activate myenv' for conda
-
-# create folders for experimental output
-mkdir log/DeepSAD
-mkdir log/DeepSAD/mnist_test
-
-# change to source directory
-cd src
-
-# run experiment
-python main.py mnist mnist_LeNet ../log/DeepSAD/mnist_test ../data --ratio_known_outlier 0.01 --ratio_pollution 0.1 --lr 0.0001 --n_epochs 150 --lr_milestone 50 --batch_size 128 --weight_decay 0.5e-6 --pretrain True --ae_lr 0.0001 --ae_n_epochs 150 --ae_batch_size 128 --ae_weight_decay 0.5e-3 --normal_class 0 --known_outlier_class 1 --n_known_outlier_classes 1;
-```
-Have a look into `main.py` for all possible arguments and options.
-
-### Baselines
-We also provide an implementation of the following baselines via the respective `baseline_<method_name>.py` scripts:
-OC-SVM (`ocsvm`), Isolation Forest (`isoforest`), Kernel Density Estimation (`kde`), kernel Semi-Supervised Anomaly 
-Detection (`ssad`), and Semi-Supervised Deep Generative Model (`SemiDGM`).
-
-Here's how to run SSAD for example on the same experimental setup as above:
-```
-cd <path-to-Deep-SAD-PyTorch-directory>
-
-# activate virtual environment
-source myenv/bin/activate  # or 'source activate myenv' for conda
-
-# create folder for experimental output
-mkdir log/ssad
-mkdir log/ssad/mnist_test
-
-# change to source directory
-cd src
-
-# run experiment
-python baseline_ssad.py mnist ../log/ssad/mnist_test ../data --ratio_known_outlier 0.01 --ratio_pollution 0.1 --kernel rbf --kappa 1.0 --normal_class 0 --known_outlier_class 1 --n_known_outlier_classes 1;
-```
-
-The autoencoder is provided through Deep SAD pre-training using `--pretrain True` with `main.py`. 
-To then run a hybrid approach using one of the classic methods on top of autoencoder features, simply point to the saved
-autoencoder model using `--load_ae ../log/DeepSAD/mnist_test/model.tar` and set `--hybrid True`.
-
-To run hybrid SSAD for example on the same experimental setup as above:
-```
-cd <path-to-Deep-SAD-PyTorch-directory>
-
-# activate virtual environment
-source myenv/bin/activate  # or 'source activate myenv' for conda
-
-# create folder for experimental output
-mkdir log/hybrid_ssad
-mkdir log/hybrid_ssad/mnist_test
-
-# change to source directory
-cd src
-
-# run experiment
-python baseline_ssad.py mnist ../log/hybrid_ssad/mnist_test ../data --ratio_known_outlier 0.01 --ratio_pollution 0.1 --kernel rbf --kappa 1.0 --hybrid True --load_ae ../log/DeepSAD/mnist_test/model.tar --normal_class 0 --known_outlier_class 1 --n_known_outlier_classes 1;
-```
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
 
 ## License
-MIT
+
+This project is licensed under the Apache-2.0 License.

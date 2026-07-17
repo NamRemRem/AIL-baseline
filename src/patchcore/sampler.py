@@ -160,13 +160,9 @@ class ApproximateGreedyCoresetSampler(GreedyCoresetSampler):
                 coreset_select_distance = self._compute_batchwise_differences(
                     features, features[select_idx : select_idx + 1]  # noqa: E203
                 )
-                approximate_coreset_anchor_distances = torch.cat(
-                    [approximate_coreset_anchor_distances, coreset_select_distance],
-                    dim=-1,
-                )
                 approximate_coreset_anchor_distances = torch.min(
-                    approximate_coreset_anchor_distances, dim=1
-                ).values.reshape(-1, 1)
+                    approximate_coreset_anchor_distances, coreset_select_distance
+                )
 
         return np.array(coreset_indices)
 

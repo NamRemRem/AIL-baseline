@@ -1,26 +1,33 @@
-# Environments
-.venv/
-venv/
-ENV/
-
-# Python caching
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Pytest / Coverage
-.pytest_cache/
-.tox/
-
-# Project results / models / outputs
-results/
-evaluated_results/
-
-# Editor etc.
+# IDE / editor
 .idea/
 .vscode/
+*.code-workspace
 
-# Packaging
+# Python
+__pycache__/
+*.py[cod]
 *.egg-info/
+*.egg
+.venv/
+.env/
+
+# Build artifacts
 dist/
 build/
+
+# Model & index files
+*.pkl
+*.faiss
+*.pth
+*.pt
+*.npy
+*.bin
+
+# Data & Results
+data/
+results/
+checkpoints/
+embeddings/
+
+# Syncthing temp files
+~syncthing~*
